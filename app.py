@@ -39,7 +39,6 @@ def normalize_plan(obj):
     return None
 
 
-# Ensure latest_plan exists & normalize it early (prevents tuple-index crash)
 if "latest_plan" not in st.session_state:
     st.session_state.latest_plan = None
 st.session_state.latest_plan = normalize_plan(st.session_state.latest_plan)
@@ -343,12 +342,10 @@ def build_detailed_itinerary(
         day_start_dt = datetime.combine(day_date, start_time)
         day_end_dt = datetime.combine(day_date, day_end_time)
 
-        # Build places: must-visit first
         places = []
         while must_idx < len(must_visit) and len(places) < stops_per_day:
             mv = must_visit[must_idx]
             must_idx += 1
-
             if mv.lower() in avoid_lower:
                 continue
 
@@ -364,7 +361,6 @@ def build_detailed_itinerary(
             })
             used_names.add(mv)
 
-        # Fill with library picks
         if len(places) < stops_per_day:
             picks, used_names = pick_places(interests, stops_per_day - len(places), used_names, avoid_lower)
             places.extend(picks)
@@ -372,7 +368,6 @@ def build_detailed_itinerary(
         timeline = []
         cursor = day_start_dt
 
-        # Start-from-stay block
         if (stay_area or "").strip():
             stay_block_end = cursor + timedelta(minutes=10)
             timeline.append({
@@ -434,7 +429,7 @@ def build_detailed_itinerary(
 
 
 # ---------------------------------
-# Optional AI: rewrite day narrative (no new info)
+# OpenAI v2: rewrite day narrative (no new info)
 # ---------------------------------
 def ai_rewrite_day_narrative(plan_day: dict, summary: dict) -> str | None:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
@@ -444,6 +439,7 @@ def ai_rewrite_day_narrative(plan_day: dict, summary: dict) -> str | None:
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
+
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
         payload = {
@@ -473,16 +469,19 @@ def ai_rewrite_day_narrative(plan_day: dict, summary: dict) -> str | None:
             "Only connect and rephrase what is already in the plan. Return plain text only."
         )
 
-        resp = client.chat.completions.create(
+        resp = client.responses.create(
             model=model,
-            messages=[
+            input=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": json.dumps(payload)}
             ],
-            temperature=0.4
+            temperature=0.4,
         )
-        return resp.choices[0].message.content.strip()
-    except Exception:
+
+        return resp.output_text.strip()
+
+    except Exception as e:
+        st.warning(f"AI rewrite failed: {e}")
         return None
 
 
@@ -583,7 +582,7 @@ st.divider()
 st.subheader("🗓️ Your Itinerary (Plan + Timeline + Explanations)")
 
 data = normalize_plan(st.session_state.latest_plan)
-st.session_state.latest_plan = data  # store normalized back
+st.session_state.latest_plan = data
 
 if data is None:
     st.info("Fill the trip inputs on the left and click **Generate itinerary**.")
