@@ -11,39 +11,42 @@ import streamlit as st
 # ---------------------------------
 st.set_page_config(page_title="Travel Planner AI", page_icon="🧭", layout="wide")
 st.title("🧭 Travel Planner AI")
-st.caption("Generates a day-wise plan + timeline + plan-based explanations (not generic).")
+st.caption("Create a day-wise itinerary with timeline + plan-based explanations + user customization.")
 
 
 # ---------------------------------
 # Utilities
 # ---------------------------------
+def parse_csv_list(text: str) -> list[str]:
+    items = [x.strip() for x in (text or "").split(",")]
+    return [x for x in items if x]
+
+
 def parse_duration_to_minutes(duration_text: str) -> int:
     """
-    Accepts strings like: "45 min", "1 hour", "2 hours", "2–3 hours", "1.5 hours"
+    Accepts strings like:
+      "45 min", "1 hour", "2 hours", "2–3 hours", "2-3 hours", "1.5 hours"
     Returns a reasonable average in minutes.
     """
-    s = duration_text.strip().lower()
+    s = (duration_text or "").strip().lower()
     s = s.replace("–", "-").replace("—", "-")
-    # Extract ranges like "2-3 hours"
+
     m = re.search(r"(\d+(\.\d+)?)\s*-\s*(\d+(\.\d+)?)\s*(hour|hours|hr|hrs)", s)
     if m:
         a = float(m.group(1))
         b = float(m.group(3))
-        avg = (a + b) / 2
+        avg = (a + b) / 2.0
         return int(round(avg * 60))
 
-    # Single "x hours"
     m = re.search(r"(\d+(\.\d+)?)\s*(hour|hours|hr|hrs)", s)
     if m:
         hrs = float(m.group(1))
         return int(round(hrs * 60))
 
-    # Minutes
     m = re.search(r"(\d+)\s*(min|mins|minute|minutes)", s)
     if m:
         return int(m.group(1))
 
-    # fallback
     return 90
 
 
@@ -51,30 +54,7 @@ def fmt_hhmm(dt_obj: datetime) -> str:
     return dt_obj.strftime("%I:%M %p").lstrip("0")
 
 
-def build_time_blocks(pace: str):
-    """
-    Defines the skeleton of the day schedule.
-    We'll create 3-5 stops depending on pace.
-    """
-    if pace == "Relaxed":
-        return ["Late Morning", "Afternoon", "Evening"]
-    if pace == "Packed":
-        return ["Early Morning", "Late Morning", "Afternoon", "Evening", "Late Night"]
-    return ["Morning", "Afternoon", "Evening"]
-
-
-def start_time_for_pace(pace: str) -> time:
-    if pace == "Packed":
-        return time(8, 30)
-    if pace == "Relaxed":
-        return time(10, 0)
-    return time(9, 0)
-
-
 def travel_time_minutes(transport: str) -> int:
-    """
-    Simple heuristic travel time between stops.
-    """
     if transport == "Walking":
         return 15
     if transport == "Public Transit":
@@ -87,22 +67,22 @@ def travel_time_minutes(transport: str) -> int:
 
 
 def safe_list_join(items):
-    items = [x for x in items if str(x).strip()]
+    items = [str(x).strip() for x in (items or []) if str(x).strip()]
     return ", ".join(items) if items else "—"
 
 
 # ---------------------------------
-# Place library (semi-structured building blocks)
-# The *explanation* is NOT generic; it is generated from the chosen plan data.
+# Place library (generic building blocks)
+# Must-visits (user typed) will override these.
 # ---------------------------------
 PLACE_LIBRARY = {
     "Food": [
         {
             "name": "Local Breakfast Café",
             "duration": "45–60 min",
-            "description": "A strong start to the day with local flavors and quick energy.",
-            "activities": ["Try a local pastry", "Order a signature coffee/tea", "Light breakfast"],
-            "nearby": ["Walkable streets for photos", "Small boutique shops"],
+            "description": "Start with local flavors and a quick energy boost.",
+            "activities": ["Try a local pastry", "Signature coffee/tea", "Light breakfast"],
+            "nearby": ["Photo-friendly streets", "Small boutique shops"],
             "food": ["Breakfast set", "Coffee + pastry"],
             "transport": "Walking / short ride",
             "tips": "Arrive early to avoid the morning rush."
@@ -110,30 +90,30 @@ PLACE_LIBRARY = {
         {
             "name": "Local Market / Food Street",
             "duration": "1.5–2 hours",
-            "description": "Best place to taste multiple local items in one area.",
-            "activities": ["Street-food tasting", "Browse local snacks", "Buy small souvenirs"],
+            "description": "Taste multiple local items in one walkable area.",
+            "activities": ["Street-food tasting", "Browse snacks", "Buy souvenirs"],
             "nearby": ["Dessert shops", "Local craft lane"],
             "food": ["Street snacks", "Regional specialty dish"],
             "transport": "Walking / public transit",
-            "tips": "Carry cash for smaller vendors; go hungry!"
+            "tips": "Carry cash for small vendors."
         },
         {
             "name": "Signature Dinner Spot",
             "duration": "1.5–2 hours",
-            "description": "A memorable end to your day with the city’s popular cuisine.",
-            "activities": ["Order house special", "Try a local drink", "Dessert tasting"],
+            "description": "End the day with a well-known local dinner option.",
+            "activities": ["Order the house special", "Try a local drink", "Dessert tasting"],
             "nearby": ["Night walk area", "Rooftop views (if available)"],
             "food": ["Main course", "Dessert"],
             "transport": "Rideshare/Taxi or transit",
-            "tips": "Reserve in advance if it’s a famous place."
+            "tips": "Reserve in advance if it’s popular."
         },
     ],
     "Nature": [
         {
             "name": "Main City Park / Scenic Viewpoint",
             "duration": "1.5–2.5 hours",
-            "description": "Good for fresh air, views, and easy walking without heavy planning.",
-            "activities": ["Short hike/walk", "Photography", "Relaxing break"],
+            "description": "Fresh air, views, and easy walking.",
+            "activities": ["Short walk", "Photography", "Relaxing break"],
             "nearby": ["Visitor center", "Lake/river promenade"],
             "food": ["Park-side café", "Quick bites nearby"],
             "transport": "Walking / public transit",
@@ -142,7 +122,7 @@ PLACE_LIBRARY = {
         {
             "name": "Botanical Garden / Nature Trail",
             "duration": "2–3 hours",
-            "description": "A slower, calming block that pairs well with a relaxed pace.",
+            "description": "A calm block that pairs well with a relaxed pace.",
             "activities": ["Garden trail", "Photo stops", "Rest breaks"],
             "nearby": ["Museum area", "Coffee shops"],
             "food": ["Garden café", "Nearby brunch spot"],
@@ -154,65 +134,65 @@ PLACE_LIBRARY = {
         {
             "name": "Historic Old Town Walk",
             "duration": "2–3 hours",
-            "description": "Heritage streets, architecture, and local culture in one walkable zone.",
+            "description": "Heritage streets, architecture, and local culture.",
             "activities": ["Walking tour", "Architecture photos", "Small museum visit"],
-            "nearby": ["Local market", "Cathedral/temple/church (if applicable)"],
+            "nearby": ["Local market", "Historic monument"],
             "food": ["Traditional lunch spot", "Bakery"],
             "transport": "Walking",
-            "tips": "Comfortable shoes; keep an eye out for local guided tours."
+            "tips": "Wear comfortable shoes."
         },
         {
             "name": "Main Museum / Cultural Center",
             "duration": "2–3 hours",
-            "description": "A focused block to understand local history and context.",
+            "description": "Understand local history and context.",
             "activities": ["Top exhibits", "Audio guide", "Gift shop quick stop"],
-            "nearby": ["City square", "Historic monument"],
+            "nearby": ["City square", "Historic site"],
             "food": ["Museum café", "Nearby restaurant strip"],
             "transport": "Public Transit / rideshare",
-            "tips": "Go right when it opens for a quieter experience."
+            "tips": "Go early for fewer crowds."
         },
     ],
     "Shopping": [
         {
             "name": "Local Bazaar / Artisan Street",
             "duration": "1.5–2.5 hours",
-            "description": "Best place to find unique local crafts and gifts.",
-            "activities": ["Browse crafts", "Bargain politely", "Pick souvenirs"],
-            "nearby": ["Street-food lane", "Photo-friendly alleys"],
+            "description": "Shop unique crafts and local items.",
+            "activities": ["Browse crafts", "Compare prices", "Pick souvenirs"],
+            "nearby": ["Street-food lane", "Photo alleys"],
             "food": ["Snacks nearby", "Dessert stall"],
             "transport": "Walking / transit",
-            "tips": "Carry a tote bag; compare prices before buying."
+            "tips": "Carry a tote bag; bargain politely."
         }
     ],
     "Nightlife": [
         {
-            "name": "Evening Walk + Viewpoint / Night Market",
+            "name": "Evening Walk + Night Market",
             "duration": "1.5–2.5 hours",
-            "description": "A lively end to the day with lights, snacks, and local vibe.",
+            "description": "Lights, snacks, and local vibe for the evening.",
             "activities": ["Night photos", "Snack tasting", "People watching"],
             "nearby": ["Dessert spots", "Live music area"],
             "food": ["Night snacks", "Dessert"],
             "transport": "Walking / rideshare",
-            "tips": "Keep valuables secure; check closing times."
+            "tips": "Check closing times and keep valuables secure."
         }
     ],
     "Adventure": [
         {
             "name": "Active Experience Block",
             "duration": "2–3 hours",
-            "description": "A higher-energy activity to make the trip memorable.",
-            "activities": ["Guided activity", "Safety briefing", "Photo/video moments"],
+            "description": "A higher-energy activity for memorable moments.",
+            "activities": ["Guided activity", "Safety briefing", "Photos/videos"],
             "nearby": ["Scenic stop", "Quick café"],
             "food": ["Energy snack", "Post-activity meal"],
             "transport": "Rideshare/Taxi / rental car",
-            "tips": "Wear comfortable gear; confirm reservations."
+            "tips": "Confirm reservations; wear comfortable gear."
         }
     ],
     "Relax": [
         {
             "name": "Spa / Slow Café + Park Time",
             "duration": "2–3 hours",
-            "description": "A slower block for recovery and a calm vibe.",
+            "description": "A slower block for recovery and calm vibes.",
             "activities": ["Massage/spa (optional)", "Slow café time", "Park sit-down"],
             "nearby": ["Bookstore", "Tea shop"],
             "food": ["Light meal", "Tea/coffee"],
@@ -223,16 +203,12 @@ PLACE_LIBRARY = {
 }
 
 
-def pick_places(interests, num_stops, used_names):
-    """
-    Select places from the library based on interests, avoiding duplicates by name.
-    """
+def pick_places(interests, num_stops, used_names: set[str], avoid_lower: set[str]):
     picks = []
     pools = []
     for it in interests:
         pools.extend(PLACE_LIBRARY.get(it, []))
 
-    # If user selected nothing, pull from all
     if not pools:
         for v in PLACE_LIBRARY.values():
             pools.extend(v)
@@ -242,10 +218,11 @@ def pick_places(interests, num_stops, used_names):
             break
         if p["name"] in used_names:
             continue
+        if p["name"].lower() in avoid_lower:
+            continue
         picks.append(p)
         used_names.add(p["name"])
 
-    # Fill if short
     if len(picks) < num_stops:
         all_places = []
         for v in PLACE_LIBRARY.values():
@@ -255,19 +232,86 @@ def pick_places(interests, num_stops, used_names):
                 break
             if p["name"] in used_names:
                 continue
+            if p["name"].lower() in avoid_lower:
+                continue
             picks.append(p)
             used_names.add(p["name"])
 
     return picks, used_names
 
 
-def build_detailed_itinerary(city, start_date_str, days, budget, pace, interests, transport, notes):
-    used_names = set()
-    dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+def generate_plan_explanation(day_num: int, city: str, slot: dict, transport: str, pace: str) -> str:
+    """
+    Explanation derived from plan data (place + duration + activities + nearby + timing).
+    """
+    p = slot["place"]
+    start = slot["start"]
+    end = slot["end"]
+    name = p.get("name", "Place")
+    duration = p.get("duration", "—")
 
-    day_blocks = build_time_blocks(pace)
-    # number of "places" per day equals blocks count minus 1 meal anchor sometimes
-    # We'll do 3 stops for balanced, 4 for packed, 2-3 for relaxed
+    acts = p.get("activities", [])
+    nearby = p.get("nearby", [])
+    food = p.get("food", [])
+    tips = p.get("tips", "")
+    travel_next = slot.get("estimated_travel_to_next_min", 0)
+
+    parts = []
+    parts.append(f"**{start}–{end} | {name}** — planned for about **{duration}** in **{city}** (Day {day_num}).")
+
+    if acts:
+        parts.append(f"Main focus: {safe_list_join(acts)}.")
+
+    if nearby:
+        parts.append(f"Nearby options to pair: {safe_list_join(nearby)}.")
+
+    if food:
+        parts.append(f"Food around this stop: {safe_list_join(food)}.")
+
+    if pace == "Packed":
+        parts.append("Because your pace is **Packed**, this stop is kept efficient to fit more in the day.")
+    elif pace == "Relaxed":
+        parts.append("Because your pace is **Relaxed**, you have buffer time here for breaks and a slower walkthrough.")
+    else:
+        parts.append("With a **Balanced** pace, this block keeps the day structured but flexible.")
+
+    parts.append(f"Transport: **{transport}**.")
+
+    if travel_next and travel_next > 0:
+        parts.append(f"Next travel estimate: ~**{travel_next} min**.")
+
+    if tips:
+        parts.append(f"Tip: {tips}")
+
+    return " ".join(parts)
+
+
+def build_detailed_itinerary(
+    city: str,
+    start_date: datetime.date,
+    end_date: datetime.date,
+    start_time: time,
+    day_end_time: time,
+    budget: str,
+    pace: str,
+    interests: list[str],
+    transport: str,
+    notes: str,
+    stay_area: str,
+    stay_type: str,
+    must_visit: list[str],
+    avoid: list[str],
+    food_pref: list[str]
+) -> dict:
+    days = max(1, (end_date - start_date).days + 1)
+    avoid_lower = {a.strip().lower() for a in avoid if a.strip()}
+
+    used_names = set()
+    itinerary_days = []
+
+    travel_gap = travel_time_minutes(transport)
+
+    # Stops per day based on pace
     if pace == "Relaxed":
         stops_per_day = 2
     elif pace == "Packed":
@@ -275,33 +319,81 @@ def build_detailed_itinerary(city, start_date_str, days, budget, pace, interests
     else:
         stops_per_day = 3
 
-    itinerary_days = []
+    must_idx = 0
+
     for i in range(days):
-        day_date_label = (dt + timedelta(days=i)).strftime("%a, %b %d")
+        day_date = start_date + timedelta(days=i)
+        day_date_label = day_date.strftime("%a, %b %d")
 
-        places, used_names = pick_places(interests, stops_per_day, used_names)
+        day_start_dt = datetime.combine(day_date, start_time if i == 0 else start_time)
+        day_end_dt = datetime.combine(day_date, day_end_time)
 
-        # Build timeline
-        start_dt = datetime.combine(dt.date() + timedelta(days=i), start_time_for_pace(pace))
-        travel_gap = travel_time_minutes(transport)
+        # Build places list: must-visit first
+        places = []
+        while must_idx < len(must_visit) and len(places) < stops_per_day:
+            mv = must_visit[must_idx]
+            must_idx += 1
 
+            if mv.lower() in avoid_lower:
+                continue
+
+            places.append({
+                "name": mv,
+                "duration": "2 hours",
+                "description": "User-selected must-visit place.",
+                "activities": ["Explore key highlights", "Photos", "Spend time based on your interest"],
+                "nearby": ["Look for nearby cafés", "Walkable spots around"],
+                "food": ["Nearby local option"],
+                "transport": transport,
+                "tips": "Check opening hours and tickets; adjust time based on crowd."
+            })
+            used_names.add(mv)
+
+        # Fill remaining with library picks
+        if len(places) < stops_per_day:
+            picks, used_names = pick_places(interests, stops_per_day - len(places), used_names, avoid_lower)
+            places.extend(picks)
+
+        # Build timeline within daily bounds
         timeline = []
-        cursor = start_dt
+        cursor = day_start_dt
+
+        # Start from stay location (if provided)
+        if stay_area.strip():
+            stay_block_end = cursor + timedelta(minutes=10)
+            timeline.append({
+                "start": fmt_hhmm(cursor),
+                "end": fmt_hhmm(stay_block_end),
+                "place": {
+                    "name": f"Start from your stay: {stay_area} ({stay_type})",
+                    "duration": "10 min",
+                    "description": "Starting point based on your accommodation.",
+                    "activities": ["Quick prep", "Grab essentials", "Head out"],
+                    "nearby": [],
+                    "food": [],
+                    "transport": transport,
+                    "tips": "Carry water, power bank, and ID."
+                },
+                "estimated_travel_to_next_min": travel_gap
+            })
+            cursor = stay_block_end + timedelta(minutes=travel_gap)
 
         for idx, place in enumerate(places):
-            dur_min = parse_duration_to_minutes(place["duration"])
-            end = cursor + timedelta(minutes=dur_min)
+            dur_min = parse_duration_to_minutes(place.get("duration", "90 min"))
+            end_dt = cursor + timedelta(minutes=dur_min)
+
+            # Respect daily end time
+            if end_dt > day_end_dt:
+                break
 
             timeline.append({
                 "start": fmt_hhmm(cursor),
-                "end": fmt_hhmm(end),
+                "end": fmt_hhmm(end_dt),
                 "place": place,
-                "estimated_travel_to_next_min": (travel_gap if idx < len(places) - 1 else 0)
+                "estimated_travel_to_next_min": travel_gap if idx < len(places) - 1 else 0
             })
 
-            cursor = end
-            if idx < len(places) - 1:
-                cursor = cursor + timedelta(minutes=travel_gap)
+            cursor = end_dt + timedelta(minutes=travel_gap)
 
         itinerary_days.append({
             "day": i + 1,
@@ -311,77 +403,28 @@ def build_detailed_itinerary(city, start_date_str, days, budget, pace, interests
 
     summary = {
         "City": city,
-        "Start Date": start_date_str,
+        "Start Date": str(start_date),
+        "End Date": str(end_date),
         "Days": days,
         "Budget": budget,
         "Pace": pace,
         "Interests": interests if interests else ["Any"],
         "Transport": transport,
+        "Stay Area": stay_area or "—",
+        "Stay Type": stay_type,
+        "Must-visit": must_visit or ["—"],
+        "Avoid": avoid or ["—"],
+        "Food Preference": food_pref or ["—"],
         "Notes": notes or "—"
     }
 
     return {"summary": summary, "days": itinerary_days}
 
 
-def generate_plan_explanation(day_num: int, city: str, slot: dict, transport: str, pace: str) -> str:
-    """
-    NON-GENERIC narrative built from the actual plan data.
-    (Still "general" in tone, but it never describes things that aren't in the plan.)
-    """
-    p = slot["place"]
-    start = slot["start"]
-    end = slot["end"]
-    name = p["name"]
-    duration = p["duration"]
-
-    acts = p.get("activities", [])
-    nearby = p.get("nearby", [])
-    food = p.get("food", [])
-    tips = p.get("tips", "")
-    travel_next = slot.get("estimated_travel_to_next_min", 0)
-
-    # Build a message strictly from plan fields
-    lines = []
-    lines.append(
-        f"**{start}–{end} | {name}** — planned for about **{duration}** in **{city}**."
-    )
-
-    if acts:
-        lines.append(f"You’ll focus on: {safe_list_join(acts)}.")
-
-    if nearby and nearby != ["—"]:
-        lines.append(f"If you still have time, nearby options you can pair with this stop: {safe_list_join(nearby)}.")
-
-    if food and food != ["—"]:
-        lines.append(f"Food idea around here: {safe_list_join(food)}.")
-
-    # Explain order/pace/transport using only user selections + computed travel
-    if pace == "Packed":
-        lines.append("Since your pace is **Packed**, this stop is kept tight so you can fit more into the day.")
-    elif pace == "Relaxed":
-        lines.append("Since your pace is **Relaxed**, you have buffer time here for breaks and a slower walkthrough.")
-    else:
-        lines.append("With a **Balanced** pace, this block keeps the day structured but flexible.")
-
-    lines.append(f"Transport note: you chose **{transport}** for getting around.")
-
-    if travel_next and travel_next > 0:
-        lines.append(f"Next move: plan ~**{travel_next} min** to reach the next stop.")
-
-    if tips:
-        lines.append(f"Local tip from your plan: {tips}")
-
-    return " ".join(lines)
-
-
 # ---------------------------------
-# Optional AI: rewrite plan-based narratives (no new places)
+# Optional AI: rewrite day narrative (no new info)
 # ---------------------------------
-def ai_rewrite_day_narrative(plan_day: dict, city: str, transport: str, pace: str) -> str | None:
-    """
-    If OPENAI_API_KEY exists, returns a single narrative paragraph for the day.
-    Must not add new places/activities beyond what's in plan_day.
-    """
+def ai_rewrite_day_narrative(plan_day: dict, summary: dict) -> str | None:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         return None
@@ -389,35 +432,33 @@ def ai_rewrite_day_narrative(plan_day: dict, city: str, transport: str, pace: st
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
-
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-        # Provide ONLY the plan data; instruct not to invent.
         payload = {
-            "city": city,
-            "pace": pace,
-            "transport": transport,
-            "day": plan_day["day"],
-            "date": plan_day["date"],
+            "city": summary.get("City"),
+            "pace": summary.get("Pace"),
+            "transport": summary.get("Transport"),
+            "day": plan_day.get("day"),
+            "date": plan_day.get("date"),
             "timeline": [
                 {
                     "start": t["start"],
                     "end": t["end"],
-                    "name": t["place"]["name"],
-                    "duration": t["place"]["duration"],
+                    "name": t["place"].get("name"),
+                    "duration": t["place"].get("duration"),
                     "activities": t["place"].get("activities", []),
                     "nearby": t["place"].get("nearby", []),
                     "food": t["place"].get("food", []),
                     "tips": t["place"].get("tips", "")
                 }
-                for t in plan_day["timeline"]
+                for t in plan_day.get("timeline", [])
             ]
         }
 
         system = (
-            "You rewrite structured travel plans into a friendly paragraph. "
-            "CRITICAL: Do NOT add new places, new activities, or facts not present in the input JSON. "
-            "Only rephrase and connect what's already there. Return plain text only."
+            "Rewrite the provided structured travel plan into a friendly paragraph. "
+            "CRITICAL: Do NOT add new places, activities, or facts not present in the input JSON. "
+            "Only connect and rephrase what is already in the plan. Return plain text only."
         )
 
         resp = client.chat.completions.create(
@@ -428,21 +469,43 @@ def ai_rewrite_day_narrative(plan_day: dict, city: str, transport: str, pace: st
             ],
             temperature=0.4
         )
-        text = resp.choices[0].message.content.strip()
-        return text
+        return resp.choices[0].message.content.strip()
     except Exception:
         return None
 
 
 # ---------------------------------
-# UI
+# Session state migration/cleanup (prevents old tuple formats breaking the new app)
+# ---------------------------------
+if "latest_plan" not in st.session_state:
+    st.session_state.latest_plan = None
+
+lp = st.session_state.latest_plan
+if isinstance(lp, tuple) and len(lp) == 2 and isinstance(lp[1], dict):
+    # old format like ("rule", {"summary":..., "days":...})
+    st.session_state.latest_plan = lp[1]
+elif lp is not None and not isinstance(lp, dict):
+    st.session_state.latest_plan = None
+
+
+# ---------------------------------
+# Sidebar UI (customized)
 # ---------------------------------
 with st.sidebar:
     st.header("Trip inputs")
 
     city = st.text_input("Destination city", placeholder="e.g., Denver, Tokyo, Paris")
-    start_date = st.date_input("Start date")
-    days = st.slider("Number of days", 1, 14, 4)
+
+    colA, colB = st.columns(2)
+    with colA:
+        start_date = st.date_input("Start date")
+        start_time_val = st.time_input("Start time", value=time(9, 0))
+    with colB:
+        end_date = st.date_input("End date", value=start_date + timedelta(days=3))
+        day_end_time_val = st.time_input("Daily end time", value=time(20, 0))
+
+    trip_days = max(1, (end_date - start_date).days + 1)
+    st.caption(f"Trip length: **{trip_days} day(s)**")
 
     budget = st.selectbox("Budget", ["Low", "Medium", "High"], index=1)
     pace = st.selectbox("Pace", ["Relaxed", "Balanced", "Packed"], index=1)
@@ -459,6 +522,20 @@ with st.sidebar:
         index=0
     )
 
+    st.subheader("Stay details")
+    stay_area = st.text_input("Where will you stay? (area/neighborhood/hotel)", placeholder="e.g., Downtown / Shinjuku / near Union Station")
+    stay_type = st.selectbox("Stay type", ["Hotel", "Airbnb", "Hostel", "With friends/family", "Not decided"], index=0)
+
+    st.subheader("Customization")
+    must_visit_text = st.text_area("Must-visit places (comma-separated)", placeholder="e.g., Red Rocks, Meow Wolf, Union Station")
+    avoid_text = st.text_area("Avoid places (comma-separated)", placeholder="e.g., bars, steep hikes, museums")
+
+    food_pref = st.multiselect(
+        "Food preference (optional)",
+        ["Vegetarian", "Vegan", "Halal", "Kosher", "No preference", "Spicy lover", "Seafood"],
+        default=["No preference"]
+    )
+
     notes = st.text_area("Extra notes (optional)", placeholder="Kids? Accessibility? Must-see places?")
 
     use_ai_rewrite = st.toggle("AI rewrite day narrative (requires OPENAI_API_KEY)", value=False)
@@ -466,41 +543,60 @@ with st.sidebar:
     generate = st.button("✨ Generate itinerary", type="primary", use_container_width=True)
 
 
-if "latest_plan" not in st.session_state:
-    st.session_state.latest_plan = None
-
-
+# ---------------------------------
+# Generate
+# ---------------------------------
 if generate:
     if not city.strip():
         st.error("Please enter a destination city.")
     else:
+        must_visit = parse_csv_list(must_visit_text)
+        avoid = parse_csv_list(avoid_text)
+
         plan = build_detailed_itinerary(
             city=city.strip(),
-            start_date_str=str(start_date),
-            days=int(days),
+            start_date=start_date,
+            end_date=end_date,
+            start_time=start_time_val,
+            day_end_time=day_end_time_val,
             budget=budget,
             pace=pace,
             interests=interests,
             transport=transport,
-            notes=notes.strip()
+            notes=notes.strip(),
+            stay_area=stay_area.strip(),
+            stay_type=stay_type,
+            must_visit=must_visit,
+            avoid=avoid,
+            food_pref=food_pref,
         )
+
         st.session_state.latest_plan = plan
         st.rerun()
 
 
+# ---------------------------------
+# Render
+# ---------------------------------
 st.divider()
-st.subheader("🗓️ Your Itinerary (Plan + Timeline + Plan-Based Explanations)")
+st.subheader("🗓️ Your Itinerary (Plan + Timeline + Explanations)")
 
 if st.session_state.latest_plan is None:
     st.info("Fill the trip inputs on the left and click **Generate itinerary**.")
 else:
     data = st.session_state.latest_plan
+    if not isinstance(data, dict) or "summary" not in data or "days" not in data:
+        st.error("Stored itinerary data is invalid (likely from an older app version). Please click **Generate itinerary** again.")
+        st.session_state.latest_plan = None
+        st.stop()
+
     summary = data["summary"]
 
     col1, col2 = st.columns([1, 1])
     with col1:
         st.markdown("### Trip Summary")
         st.json(summary)
+
     with col2:
         st.markdown("### Export")
         export_json = json.dumps(data, indent=2)
@@ -516,9 +612,9 @@ else:
     for day in data["days"]:
         with st.expander(f"Day {day['day']} — {day['date']}", expanded=(day["day"] == 1)):
 
-            # Optional AI rewrite for the whole day (still plan-based, no new info)
+            # Optional AI rewrite for the whole day (still plan-based)
             if use_ai_rewrite:
-                rewritten = ai_rewrite_day_narrative(day, summary["City"], summary["Transport"], summary["Pace"])
+                rewritten = ai_rewrite_day_narrative(day, summary)
                 if rewritten:
                     st.markdown("#### 🤖 AI Day Narrative (based strictly on your plan)")
                     st.write(rewritten)
@@ -527,27 +623,24 @@ else:
                     st.info("AI rewrite is ON, but OPENAI_API_KEY is missing or request failed. Showing plan-based explanations below.")
                     st.divider()
 
-            for slot in day["timeline"]:
-                p = slot["place"]
+            for slot in day.get("timeline", []):
+                p = slot.get("place", {})
 
-                # Header with timeline
-                st.markdown(f"## 📍 {slot['start']} – {slot['end']} | {p['name']}")
-                st.write(f"⏱️ **Time Required:** {p['duration']}")
-                st.write(f"🚶 **Transport:** {summary['Transport']}")
+                st.markdown(f"## 📍 {slot.get('start','—')} – {slot.get('end','—')} | {p.get('name','—')}")
+                st.write(f"⏱️ **Time Required:** {p.get('duration','—')}")
+                st.write(f"🚶 **Transport:** {summary.get('Transport','—')}")
                 st.write(f"🍽️ **Food Nearby:** {safe_list_join(p.get('food', []))}")
 
-                # The key part you asked for:
                 st.markdown("### 🧠 Explanation (generated from plan data)")
                 expl = generate_plan_explanation(
-                    day_num=day["day"],
-                    city=summary["City"],
+                    day_num=day.get("day", 1),
+                    city=summary.get("City", "—"),
                     slot=slot,
-                    transport=summary["Transport"],
-                    pace=summary["Pace"]
+                    transport=summary.get("Transport", "—"),
+                    pace=summary.get("Pace", "Balanced")
                 )
                 st.write(expl)
 
-                # Details that are also plan-derived
                 st.markdown("### 🎯 What you can do here (from plan)")
                 for a in p.get("activities", []):
                     st.write(f"- {a}")
@@ -559,7 +652,6 @@ else:
                 st.markdown("### 💡 Tip (from plan)")
                 st.write(p.get("tips", "—"))
 
-                # Travel time to next
                 if slot.get("estimated_travel_to_next_min", 0) > 0:
                     st.caption(f"Next stop travel estimate: ~{slot['estimated_travel_to_next_min']} minutes")
 
