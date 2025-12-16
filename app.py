@@ -15,6 +15,37 @@ st.caption("Create a day-wise itinerary with timeline + plan-based explanations 
 
 
 # ---------------------------------
+# Fix: normalize older session formats
+# ---------------------------------
+def normalize_plan(obj):
+    """
+    Converts older formats of st.session_state.latest_plan into the new dict format:
+      - Old: ("rule", {"summary":..., "days":...})
+      - New: {"summary":..., "days":...}
+    Anything else -> None.
+    """
+    if obj is None:
+        return None
+
+    if isinstance(obj, tuple) and len(obj) == 2 and isinstance(obj[1], dict):
+        inner = obj[1]
+        if isinstance(inner, dict) and "summary" in inner and "days" in inner:
+            return inner
+        return None
+
+    if isinstance(obj, dict) and "summary" in obj and "days" in obj:
+        return obj
+
+    return None
+
+
+# Ensure latest_plan exists & normalize it early (prevents tuple-index crash)
+if "latest_plan" not in st.session_state:
+    st.session_state.latest_plan = None
+st.session_state.latest_plan = normalize_plan(st.session_state.latest_plan)
+
+
+# ---------------------------------
 # Utilities
 # ---------------------------------
 def parse_csv_list(text: str) -> list[str]:
@@ -23,11 +54,6 @@ def parse_csv_list(text: str) -> list[str]:
 
 
 def parse_duration_to_minutes(duration_text: str) -> int:
-    """
-    Accepts strings like:
-      "45 min", "1 hour", "2 hours", "2–3 hours", "2-3 hours", "1.5 hours"
-    Returns a reasonable average in minutes.
-    """
     s = (duration_text or "").strip().lower()
     s = s.replace("–", "-").replace("—", "-")
 
@@ -35,13 +61,11 @@ def parse_duration_to_minutes(duration_text: str) -> int:
     if m:
         a = float(m.group(1))
         b = float(m.group(3))
-        avg = (a + b) / 2.0
-        return int(round(avg * 60))
+        return int(round(((a + b) / 2.0) * 60))
 
     m = re.search(r"(\d+(\.\d+)?)\s*(hour|hours|hr|hrs)", s)
     if m:
-        hrs = float(m.group(1))
-        return int(round(hrs * 60))
+        return int(round(float(m.group(1)) * 60))
 
     m = re.search(r"(\d+)\s*(min|mins|minute|minutes)", s)
     if m:
@@ -241,12 +265,9 @@ def pick_places(interests, num_stops, used_names: set[str], avoid_lower: set[str
 
 
 def generate_plan_explanation(day_num: int, city: str, slot: dict, transport: str, pace: str) -> str:
-    """
-    Explanation derived from plan data (place + duration + activities + nearby + timing).
-    """
-    p = slot["place"]
-    start = slot["start"]
-    end = slot["end"]
+    p = slot.get("place", {})
+    start = slot.get("start", "—")
+    end = slot.get("end", "—")
     name = p.get("name", "Place")
     duration = p.get("duration", "—")
 
@@ -256,30 +277,25 @@ def generate_plan_explanation(day_num: int, city: str, slot: dict, transport: st
     tips = p.get("tips", "")
     travel_next = slot.get("estimated_travel_to_next_min", 0)
 
-    parts = []
-    parts.append(f"**{start}–{end} | {name}** — planned for about **{duration}** in **{city}** (Day {day_num}).")
+    parts = [f"**{start}–{end} | {name}** — planned for about **{duration}** in **{city}** (Day {day_num})."]
 
     if acts:
         parts.append(f"Main focus: {safe_list_join(acts)}.")
-
     if nearby:
         parts.append(f"Nearby options to pair: {safe_list_join(nearby)}.")
-
     if food:
         parts.append(f"Food around this stop: {safe_list_join(food)}.")
 
     if pace == "Packed":
-        parts.append("Because your pace is **Packed**, this stop is kept efficient to fit more in the day.")
+        parts.append("Pace: **Packed** (tight blocks to fit more stops).")
     elif pace == "Relaxed":
-        parts.append("Because your pace is **Relaxed**, you have buffer time here for breaks and a slower walkthrough.")
+        parts.append("Pace: **Relaxed** (extra buffer for breaks).")
     else:
-        parts.append("With a **Balanced** pace, this block keeps the day structured but flexible.")
+        parts.append("Pace: **Balanced** (structured but flexible).")
 
     parts.append(f"Transport: **{transport}**.")
-
     if travel_next and travel_next > 0:
         parts.append(f"Next travel estimate: ~**{travel_next} min**.")
-
     if tips:
         parts.append(f"Tip: {tips}")
 
@@ -288,10 +304,10 @@ def generate_plan_explanation(day_num: int, city: str, slot: dict, transport: st
 
 def build_detailed_itinerary(
     city: str,
-    start_date: datetime.date,
-    end_date: datetime.date,
-    start_time: time,
-    day_end_time: time,
+    start_date,
+    end_date,
+    start_time,
+    day_end_time,
     budget: str,
     pace: str,
     interests: list[str],
@@ -304,14 +320,12 @@ def build_detailed_itinerary(
     food_pref: list[str]
 ) -> dict:
     days = max(1, (end_date - start_date).days + 1)
-    avoid_lower = {a.strip().lower() for a in avoid if a.strip()}
-
+    avoid_lower = {a.strip().lower() for a in (avoid or []) if a.strip()}
     used_names = set()
     itinerary_days = []
 
     travel_gap = travel_time_minutes(transport)
 
-    # Stops per day based on pace
     if pace == "Relaxed":
         stops_per_day = 2
     elif pace == "Packed":
@@ -319,16 +333,17 @@ def build_detailed_itinerary(
     else:
         stops_per_day = 3
 
+    must_visit = must_visit or []
     must_idx = 0
 
     for i in range(days):
         day_date = start_date + timedelta(days=i)
         day_date_label = day_date.strftime("%a, %b %d")
 
-        day_start_dt = datetime.combine(day_date, start_time if i == 0 else start_time)
+        day_start_dt = datetime.combine(day_date, start_time)
         day_end_dt = datetime.combine(day_date, day_end_time)
 
-        # Build places list: must-visit first
+        # Build places: must-visit first
         places = []
         while must_idx < len(must_visit) and len(places) < stops_per_day:
             mv = must_visit[must_idx]
@@ -342,24 +357,23 @@ def build_detailed_itinerary(
                 "duration": "2 hours",
                 "description": "User-selected must-visit place.",
                 "activities": ["Explore key highlights", "Photos", "Spend time based on your interest"],
-                "nearby": ["Look for nearby cafés", "Walkable spots around"],
+                "nearby": ["Nearby cafés", "Walkable spots around"],
                 "food": ["Nearby local option"],
                 "transport": transport,
-                "tips": "Check opening hours and tickets; adjust time based on crowd."
+                "tips": "Check opening hours/tickets; adjust time based on crowds."
             })
             used_names.add(mv)
 
-        # Fill remaining with library picks
+        # Fill with library picks
         if len(places) < stops_per_day:
             picks, used_names = pick_places(interests, stops_per_day - len(places), used_names, avoid_lower)
             places.extend(picks)
 
-        # Build timeline within daily bounds
         timeline = []
         cursor = day_start_dt
 
-        # Start from stay location (if provided)
-        if stay_area.strip():
+        # Start-from-stay block
+        if (stay_area or "").strip():
             stay_block_end = cursor + timedelta(minutes=10)
             timeline.append({
                 "start": fmt_hhmm(cursor),
@@ -382,7 +396,6 @@ def build_detailed_itinerary(
             dur_min = parse_duration_to_minutes(place.get("duration", "90 min"))
             end_dt = cursor + timedelta(minutes=dur_min)
 
-            # Respect daily end time
             if end_dt > day_end_dt:
                 break
 
@@ -392,7 +405,6 @@ def build_detailed_itinerary(
                 "place": place,
                 "estimated_travel_to_next_min": travel_gap if idx < len(places) - 1 else 0
             })
-
             cursor = end_dt + timedelta(minutes=travel_gap)
 
         itinerary_days.append({
@@ -442,14 +454,14 @@ def ai_rewrite_day_narrative(plan_day: dict, summary: dict) -> str | None:
             "date": plan_day.get("date"),
             "timeline": [
                 {
-                    "start": t["start"],
-                    "end": t["end"],
-                    "name": t["place"].get("name"),
-                    "duration": t["place"].get("duration"),
-                    "activities": t["place"].get("activities", []),
-                    "nearby": t["place"].get("nearby", []),
-                    "food": t["place"].get("food", []),
-                    "tips": t["place"].get("tips", "")
+                    "start": t.get("start"),
+                    "end": t.get("end"),
+                    "name": (t.get("place") or {}).get("name"),
+                    "duration": (t.get("place") or {}).get("duration"),
+                    "activities": (t.get("place") or {}).get("activities", []),
+                    "nearby": (t.get("place") or {}).get("nearby", []),
+                    "food": (t.get("place") or {}).get("food", []),
+                    "tips": (t.get("place") or {}).get("tips", "")
                 }
                 for t in plan_day.get("timeline", [])
             ]
@@ -475,21 +487,7 @@ def ai_rewrite_day_narrative(plan_day: dict, summary: dict) -> str | None:
 
 
 # ---------------------------------
-# Session state migration/cleanup (prevents old tuple formats breaking the new app)
-# ---------------------------------
-if "latest_plan" not in st.session_state:
-    st.session_state.latest_plan = None
-
-lp = st.session_state.latest_plan
-if isinstance(lp, tuple) and len(lp) == 2 and isinstance(lp[1], dict):
-    # old format like ("rule", {"summary":..., "days":...})
-    st.session_state.latest_plan = lp[1]
-elif lp is not None and not isinstance(lp, dict):
-    st.session_state.latest_plan = None
-
-
-# ---------------------------------
-# Sidebar UI (customized)
+# Sidebar UI
 # ---------------------------------
 with st.sidebar:
     st.header("Trip inputs")
@@ -540,11 +538,14 @@ with st.sidebar:
 
     use_ai_rewrite = st.toggle("AI rewrite day narrative (requires OPENAI_API_KEY)", value=False)
 
+    api_ok = bool(os.getenv("OPENAI_API_KEY", "").strip())
+    st.caption("🔑 OpenAI key detected ✅" if api_ok else "🔑 OpenAI key detected ❌ (add OPENAI_API_KEY in Streamlit Secrets)")
+
     generate = st.button("✨ Generate itinerary", type="primary", use_container_width=True)
 
 
 # ---------------------------------
-# Generate
+# Generate itinerary
 # ---------------------------------
 if generate:
     if not city.strip():
@@ -581,15 +582,12 @@ if generate:
 st.divider()
 st.subheader("🗓️ Your Itinerary (Plan + Timeline + Explanations)")
 
-if st.session_state.latest_plan is None:
+data = normalize_plan(st.session_state.latest_plan)
+st.session_state.latest_plan = data  # store normalized back
+
+if data is None:
     st.info("Fill the trip inputs on the left and click **Generate itinerary**.")
 else:
-    data = st.session_state.latest_plan
-    if not isinstance(data, dict) or "summary" not in data or "days" not in data:
-        st.error("Stored itinerary data is invalid (likely from an older app version). Please click **Generate itinerary** again.")
-        st.session_state.latest_plan = None
-        st.stop()
-
     summary = data["summary"]
 
     col1, col2 = st.columns([1, 1])
@@ -609,10 +607,9 @@ else:
         )
 
     st.markdown("### Daily Plan")
-    for day in data["days"]:
-        with st.expander(f"Day {day['day']} — {day['date']}", expanded=(day["day"] == 1)):
+    for day in data.get("days", []):
+        with st.expander(f"Day {day.get('day')} — {day.get('date')}", expanded=(day.get("day") == 1)):
 
-            # Optional AI rewrite for the whole day (still plan-based)
             if use_ai_rewrite:
                 rewritten = ai_rewrite_day_narrative(day, summary)
                 if rewritten:
